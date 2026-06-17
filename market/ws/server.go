@@ -21,12 +21,12 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	hub      *Hub
-	conn     *websocket.Conn
-	send     chan []byte
-	subs     map[types.Symbol]struct{}
-	remote   string
-	mu       sync.Mutex
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	subs   map[types.Symbol]struct{}
+	remote string
+	mu     sync.Mutex
 }
 
 type Hub struct {
@@ -39,11 +39,12 @@ type Hub struct {
 }
 
 type Server struct {
-	hub    *Hub
-	engine *matching.MatchingEngine
-	logger *zap.Logger
-	port   int
-	srv    *http.Server
+	hub          *Hub
+	engine       *matching.MatchingEngine
+	logger       *zap.Logger
+	port         int
+	srv          *http.Server
+	snapshotFunc func() error
 }
 
 func NewHub(logger *zap.Logger) *Hub {
@@ -104,12 +105,17 @@ func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, po
 	}
 }
 
+func (s *Server) SetSnapshotFunc(fn func() error) {
+	s.snapshotFunc = fn
+}
+
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/trades", s.handleGetTrades)
 	mux.HandleFunc("/api/v1/depth", s.handleGetDepth)
+	mux.HandleFunc("/admin/orderbook/snapshot", s.handleAdminOrderBookSnapshot)
 
 	s.srv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.port),
@@ -167,6 +173,26 @@ func (s *Server) handleGetTrades(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetDepth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "depth endpoint"})
+}
+
+func (s *Server) handleAdminOrderBookSnapshot(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.snapshotFunc == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		json.NewEncoder(w).Encode(map[string]string{"error": "order book snapshotting is not configured"})
+		return
+	}
+	if err := s.snapshotFunc(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "snapshot written"})
 }
 
 func (c *Client) readPump() {

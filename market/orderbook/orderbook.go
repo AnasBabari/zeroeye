@@ -1,6 +1,9 @@
 package orderbook
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -28,6 +31,19 @@ type OrderBook struct {
 	closed    bool
 }
 
+const snapshotVersion = 1
+
+type SnapshotData struct {
+	Version   int           `json:"version"`
+	Symbol    types.Symbol  `json:"symbol"`
+	Config    Config        `json:"config"`
+	Bids      []types.Level `json:"bids"`
+	Asks      []types.Level `json:"asks"`
+	Orders    []types.Order `json:"orders"`
+	Sequence  uint64        `json:"sequence"`
+	UpdatedAt time.Time     `json:"updated_at"`
+}
+
 func NewOrderBook(symbol types.Symbol, config Config) *OrderBook {
 	return &OrderBook{
 		symbol:   symbol,
@@ -37,6 +53,87 @@ func NewOrderBook(symbol types.Symbol, config Config) *OrderBook {
 		orders:   make(map[string]*types.Order),
 		sequence: 0,
 	}
+}
+
+func (ob *OrderBook) Snapshot() ([]byte, error) {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+
+	if ob.closed {
+		return nil, ErrBookClosed
+	}
+
+	orders := make([]types.Order, 0, len(ob.orders))
+	for _, order := range ob.orders {
+		if order == nil {
+			continue
+		}
+		orders = append(orders, *order)
+	}
+	sort.Slice(orders, func(i, j int) bool {
+		return orders[i].ID < orders[j].ID
+	})
+
+	data := SnapshotData{
+		Version:   snapshotVersion,
+		Symbol:    ob.symbol,
+		Config:    ob.config,
+		Bids:      cloneLevels(ob.bids),
+		Asks:      cloneLevels(ob.asks),
+		Orders:    orders,
+		Sequence:  ob.sequence,
+		UpdatedAt: ob.updatedAt,
+	}
+
+	return json.MarshalIndent(data, "", "  ")
+}
+
+func (ob *OrderBook) Recover(data []byte) error {
+	var snapshot SnapshotData
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSnapshot, err)
+	}
+
+	if snapshot.Version != snapshotVersion {
+		return fmt.Errorf("%w: unsupported version %d", ErrInvalidSnapshot, snapshot.Version)
+	}
+	if snapshot.Symbol == "" {
+		return fmt.Errorf("%w: missing symbol", ErrInvalidSnapshot)
+	}
+	if snapshot.Symbol != ob.symbol {
+		return fmt.Errorf("%w: snapshot symbol %s does not match book symbol %s", ErrInvalidSnapshot, snapshot.Symbol, ob.symbol)
+	}
+
+	bids := levelsFromSnapshot(snapshot.Bids)
+	asks := levelsFromSnapshot(snapshot.Asks)
+	sort.Slice(bids, func(i, j int) bool {
+		return bids[i].Price.GreaterThan(bids[j].Price)
+	})
+	sort.Slice(asks, func(i, j int) bool {
+		return asks[i].Price.LessThan(asks[j].Price)
+	})
+
+	orders := make(map[string]*types.Order, len(snapshot.Orders))
+	for i := range snapshot.Orders {
+		order := snapshot.Orders[i]
+		if order.ID == "" {
+			return fmt.Errorf("%w: order without id", ErrInvalidSnapshot)
+		}
+		orders[order.ID] = &order
+	}
+
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+
+	ob.config = snapshot.Config
+	ob.bids = bids
+	ob.asks = asks
+	ob.orders = orders
+	ob.sequence = snapshot.Sequence
+	ob.updatedAt = snapshot.UpdatedAt
+	ob.closed = false
+
+	return nil
 }
 
 func (ob *OrderBook) AddOrder(order *types.Order) ([]*types.Trade, error) {
@@ -155,8 +252,9 @@ func (ob *OrderBook) Close() {
 }
 
 var (
-	ErrBookClosed    = &BookError{"order book is closed"}
-	ErrOrderNotFound = &BookError{"order not found"}
+	ErrBookClosed      = &BookError{"order book is closed"}
+	ErrOrderNotFound   = &BookError{"order not found"}
+	ErrInvalidSnapshot = errors.New("invalid order book snapshot")
 )
 
 type BookError struct {
@@ -185,4 +283,24 @@ func removeLevel(levels []*types.Level, price decimal.Decimal) []*types.Level {
 		}
 	}
 	return levels
+}
+
+func cloneLevels(levels []*types.Level) []types.Level {
+	result := make([]types.Level, 0, len(levels))
+	for _, level := range levels {
+		if level == nil {
+			continue
+		}
+		result = append(result, *level)
+	}
+	return result
+}
+
+func levelsFromSnapshot(levels []types.Level) []*types.Level {
+	result := make([]*types.Level, len(levels))
+	for i := range levels {
+		level := levels[i]
+		result[i] = &level
+	}
+	return result
 }
