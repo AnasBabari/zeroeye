@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-06-18T18:35:56.479310+00:00",
+  "commit": "287b5368",
+  "diagnostic_logd": [
+    "diagnostic\\build-287b5368-part001.logd",
+    "diagnostic\\build-287b5368-part002.logd",
+    "diagnostic\\build-287b5368-part003.logd",
+    "diagnostic\\build-287b5368-part004.logd",
+    "diagnostic\\build-287b5368-part005.logd",
+    "diagnostic\\build-287b5368-part006.logd",
+    "diagnostic\\build-287b5368-part007.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "228b6d56ab775dcc5bea",
+  "decrypt_command": "encryptly unpack diagnostic\\build-287b5368.logd <outdir> --password 228b6d56ab775dcc5bea",
+  "total_modules": 10,
+  "passed": 2,
+  "failed": 8,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "frontend",
+      "status": "PASS",
+      "elapsed_seconds": 24.742,
+      "artifact": "C:\\Users\\Nb\\Documents\\Codex\\2026-06-17\\files-mentioned-by-the-user-codex\\work\\zeroeye\\frontend\\dist",
+      "output": "> tent-frontend@0.0.0 build\n> tsc -b && vite build\n\n\u001b[36mvite v6.4.3 \u001b[32mbuilding for production...\u001b[36m\u001b[39m\ntransforming...\n\u001b[32m\u2713\u001b[39m 100 modules transformed.\nrendering chunks...\ncomputing gzip size...\n\u001b[2mdist/\u001b[22m\u001b[32mindex.html                 \u001b[39m\u001b[1m\u001b[2m  0.63 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip:  0.35 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[36massets/state-BkjSKDbY.js   \u001b[39m\u001b[1m\u001b[2m  8.91 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip:  3.54 kB\u001b[22m\u001b[2m \u2502 map:    57.15 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[36massets/vendor-CREcWLHI.js  \u001b[39m\u001b[1m\u001b[2m 48.93 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip: 17.25 kB\u001b[22m\u001b[2m \u2502 map:   481.27 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[36massets/index-CyxcoTyU.js   \u001b[39m\u001b[1m\u001b[2m231.32 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip: 72.16 kB\u001b[22m\u001b[2m \u2502 map: 1,045.57 kB\u001b[22m\n\u001b[32m\u2713 built in 2.87s\u001b[39m"
+    },
+    {
+      "name": "market",
+      "status": "PASS",
+      "elapsed_seconds": 90.847,
+      "artifact": "C:\\Users\\Nb\\Documents\\Codex\\2026-06-17\\files-mentioned-by-the-user-codex\\work\\zeroeye\\market\\market",
+      "output": ""
+    },
+    {
+      "name": "frailbox",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "engine",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    },
+    {
+      "name": "openapi-tools",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic\\build-287b5368-part001.logd, diagnostic\\build-287b5368-part002.logd, diagnostic\\build-287b5368-part003.logd, diagnostic\\build-287b5368-part004.logd, diagnostic\\build-287b5368-part005.logd, diagnostic\\build-287b5368-part006.logd, diagnostic\\build-287b5368-part007.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
