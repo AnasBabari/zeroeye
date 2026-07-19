@@ -12,12 +12,15 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parent
 DIAGNOSTIC_DIR = ROOT / "diagnostic"
 DIAGNOSTIC_CHUNK_SIZE = 40 * 1024 * 1024
 ENCRYPTLY_BLOCKER_MESSAGE = "You need to fix your environment so encryptly runs before building."
+ENCRYPTLY_PACK_MAX_ATTEMPTS = 3
+ENCRYPTLY_PACK_INITIAL_BACKOFF_SECONDS = 0.5
+ENCRYPTLY_PACK_MAX_BACKOFF_SECONDS = 5.0
 
 
 def current_commit_id() -> str:
@@ -78,6 +81,16 @@ class Module:
     clean_cmd: list[str]
     build_dir: Optional[Path] = None
     env: Optional[dict[str, str]] = None
+
+
+@dataclass
+class EncryptlyPackResult:
+    success: bool
+    password: str = ""
+    terminal_error: Optional[str] = None
+    attempts: int = 0
+    retry_count: int = 0
+    retry_errors: Optional[list[str]] = None
 
 MODULES = [
     Module(
@@ -222,8 +235,30 @@ def encryptly_platform_help() -> str:
     return f"detected {detected}; available: {available}"
 
 
+def validate_platform_config_at_startup() -> None:
+    """Validate platform configuration with JSON Schema before any build work."""
+    import importlib.util
+    validator_path = ROOT / "tools" / "config_validator.py"
+    spec = importlib.util.spec_from_file_location("config_validator", validator_path)
+    if spec is None or spec.loader is None:
+        print("WARNING: config validator not found, skipping validation", file=sys.stderr)
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config_path = ROOT / "config" / "platform.json"
+    if not config_path.exists():
+        print(f"WARNING: {config_path} not found, skipping validation", file=sys.stderr)
+        return
+    try:
+        module.validate_platform_config(module.load_json_config(config_path))
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def check_encryptly_runs(timeout: int = 60) -> tuple[bool, str]:
     """Verify encryptly can create a diagnostic bundle before doing any build work."""
+    validate_platform_config_at_startup()
     encryptly_bin = get_encryptly_bin()
     if encryptly_bin is None:
         return False, f"encryptly binary not found ({encryptly_platform_help()})"
@@ -262,6 +297,98 @@ def check_encryptly_runs(timeout: int = 60) -> tuple[bool, str]:
         return False, str(e)
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def pack_logd_with_retries(
+    encryptly_bin: Path,
+    logd_path: Path,
+    workspace: Path,
+    *,
+    max_attempts: int = ENCRYPTLY_PACK_MAX_ATTEMPTS,
+    initial_backoff: float = ENCRYPTLY_PACK_INITIAL_BACKOFF_SECONDS,
+    max_backoff: float = ENCRYPTLY_PACK_MAX_BACKOFF_SECONDS,
+    timeout: int = 300,
+    sleep: Callable[[float], None] = time.sleep,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> EncryptlyPackResult:
+    """Create a diagnostic .logd with bounded retries for transient pack failures."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+
+    retry_errors: list[str] = []
+    terminal_error: Optional[str] = None
+    delay = initial_backoff
+
+    for attempt in range(1, max_attempts + 1):
+        if logd_path.exists():
+            try:
+                logd_path.unlink()
+            except OSError as e:
+                terminal_error = f"could not remove partial {logd_path.name}: {e}"
+                retry_errors.append(terminal_error)
+                if attempt < max_attempts:
+                    sleep(delay)
+                    delay = min(delay * 2, max_backoff)
+                continue
+
+        try:
+            result = runner(
+                [
+                    str(encryptly_bin),
+                    "pack",
+                    str(logd_path),
+                    "--include",
+                    str(workspace),
+                    "--max-file-size",
+                    "61440",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode == 0 and logd_path.exists():
+                return EncryptlyPackResult(
+                    success=True,
+                    password=result.stdout.strip(),
+                    attempts=attempt,
+                    retry_count=attempt - 1,
+                    retry_errors=retry_errors,
+                )
+            if result.returncode == 0:
+                terminal_error = "encryptly pack completed without creating a .logd"
+            else:
+                terminal_error = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "encryptly pack failed"
+                )
+        except subprocess.TimeoutExpired:
+            terminal_error = f"encryptly pack TIMEOUT ({timeout}s)"
+        except Exception as e:
+            terminal_error = str(e)
+
+        retry_errors.append(terminal_error)
+        if logd_path.exists():
+            try:
+                logd_path.unlink()
+            except OSError as e:
+                cleanup_error = f"could not remove partial {logd_path.name}: {e}"
+                retry_errors.append(cleanup_error)
+                terminal_error = cleanup_error
+
+        if attempt < max_attempts:
+            sleep(delay)
+            delay = min(delay * 2, max_backoff)
+
+    return EncryptlyPackResult(
+        success=False,
+        terminal_error=terminal_error or "encryptly pack failed",
+        attempts=max_attempts,
+        retry_count=max_attempts - 1,
+        retry_errors=retry_errors,
+    )
+
 
 class Colors:
     GREEN = "\033[92m"
@@ -487,8 +614,13 @@ def build_diagnostic_report(
     logd_relpaths: Optional[list[str]] = None,
     password: Optional[str] = None,
     logd_error: Optional[str] = None,
+    logd_attempts: Optional[int] = None,
+    logd_retry_count: Optional[int] = None,
+    logd_retry_errors: Optional[list[str]] = None,
     chunked: bool = False,
     message_blocker: Optional[str] = None,
+    encryptly_retry_count: int = 0,
+    encryptly_terminal_error: Optional[str] = None,
 ) -> dict:
     diagnostic_logd: Optional[str | list[str]]
     if not logd_relpaths:
@@ -500,13 +632,18 @@ def build_diagnostic_report(
 
     decrypt_target = logd_relpaths[0] if logd_relpaths and len(logd_relpaths) == 1 else None
     if logd_relpaths and len(logd_relpaths) > 1:
-        decrypt_target = str((DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT))
+        decrypt_target = display_path(DIAGNOSTIC_DIR / f"build-{commit_id}.logd")
 
     report = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "commit": commit_id,
         "diagnostic_logd": diagnostic_logd,
         "diagnostic_logd_error": logd_error,
+        "diagnostic_logd_attempts": logd_attempts,
+        "diagnostic_logd_retry_count": logd_retry_count,
+        "diagnostic_logd_retry_errors": logd_retry_errors,
+        "encryptly_retry_count": encryptly_retry_count,
+        "encryptly_terminal_error": encryptly_terminal_error,
         "message_blocker": message_blocker,
         "chunked": chunked,
         "chunk_size_bytes": DIAGNOSTIC_CHUNK_SIZE if chunked else None,
@@ -537,9 +674,15 @@ def build_diagnostic_report(
     return report
 
 
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
 def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
     metadata_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"    {color('✓', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
+    print(f"    {color('✓', Colors.GREEN)} {display_path(metadata_path)} created")
 
 
 def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
@@ -548,6 +691,11 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
     if not existing:
         print(f"    {color('✗', Colors.RED)} No diagnostic artifacts found to commit")
         return False
+
+    outside = [path for path in existing if not path.resolve().is_relative_to(ROOT.resolve())]
+    if outside:
+        print(f"    {color('✓', Colors.GREEN)} Diagnostic artifacts written outside repo; skipping git commit")
+        return True
 
     relpaths = [str(path.relative_to(ROOT)) for path in existing]
     status = subprocess.run(
@@ -596,8 +744,8 @@ def generate_logd(
     verbose: bool = False,
 ) -> bool:
     logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
-    display_logd = logd_path.relative_to(ROOT)
-    print(f"\n  {color('▸', Colors.CYAN)} Finalizing diagnostics for {color(str(display_logd), Colors.BOLD)}...")
+    display_logd = display_path(logd_path)
+    print(f"\n  {color('▸', Colors.CYAN)} Finalizing diagnostics for {color(display_logd, Colors.BOLD)}...")
 
     # Always write the JSON report first. The encrypted .logd is useful, but the
     # report is required even when the build failed before compilation started or
@@ -614,6 +762,9 @@ def generate_logd(
                 results,
                 commit_id,
                 logd_error=error,
+                logd_attempts=0,
+                logd_retry_count=0,
+                logd_retry_errors=[],
                 message_blocker=ENCRYPTLY_BLOCKER_MESSAGE,
             ),
         )
@@ -665,26 +816,12 @@ def generate_logd(
                 log_lines.append(output)
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
-        sr = subprocess.run(
-            [
-                str(encryptly_bin),
-                "pack",
-                str(logd_path),
-                "--include",
-                str(workspace),
-                "--max-file-size",
-                "61440",
-            ],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if sr.returncode != 0:
-            error = sr.stderr.strip() or sr.stdout.strip() or "encryptly pack failed"
+        pack_result = pack_logd_with_retries(encryptly_bin, logd_path, workspace)
+        if not pack_result.success:
+            error = pack_result.terminal_error or "encryptly pack failed"
             print(
                 f"    {color('✗', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
-                f"{error}"
+                f"{error} after {pack_result.retry_count} retry attempt(s)"
             )
             if logd_path.exists():
                 logd_path.unlink()
@@ -694,6 +831,9 @@ def generate_logd(
                     results,
                     commit_id,
                     logd_error=error,
+                    logd_attempts=pack_result.attempts,
+                    logd_retry_count=pack_result.retry_count,
+                    logd_retry_errors=pack_result.retry_errors,
                     message_blocker=ENCRYPTLY_BLOCKER_MESSAGE,
                 ),
             )
@@ -701,10 +841,15 @@ def generate_logd(
             commit_diagnostic_artifacts([metadata_path], commit_id)
             return False
 
-        safe_pw = sr.stdout.strip()
+        safe_pw = pack_result.password
         logd_files = split_diagnostic_logd(logd_path)
-        logd_relpaths = [str(path.relative_to(ROOT)) for path in logd_files]
-        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else str(logd_path.relative_to(ROOT))
+        logd_relpaths = [display_path(path) for path in logd_files]
+        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else display_path(logd_path)
+        if pack_result.retry_count:
+            print(
+                f"    {color('✓', Colors.GREEN)} encryptly succeeded after "
+                f"{pack_result.retry_count} retry attempt(s)"
+            )
         write_diagnostic_report(
             metadata_path,
             build_diagnostic_report(
@@ -712,6 +857,9 @@ def generate_logd(
                 commit_id,
                 logd_relpaths=logd_relpaths,
                 password=safe_pw,
+                logd_attempts=pack_result.attempts,
+                logd_retry_count=pack_result.retry_count,
+                logd_retry_errors=pack_result.retry_errors,
                 chunked=len(logd_files) > 1,
             ),
         )
@@ -719,7 +867,7 @@ def generate_logd(
         for path in logd_files:
             size_kb = path.stat().st_size / 1024.0
             print(
-                f"    {color('✓', Colors.GREEN)} {path.relative_to(ROOT)} created "
+                f"    {color('✓', Colors.GREEN)} {display_path(path)} created "
                 f"({size_kb:.1f} KiB)"
             )
         if len(logd_files) > 1:
@@ -737,7 +885,7 @@ def generate_logd(
             print(f"             diagnostic log file(s) and metadata file with this password.")
             if len(logd_files) > 1:
                 print(f"             Reassemble chunks in order before unpacking:")
-                print(f"             cat {' '.join(logd_relpaths)} > {logd_path.relative_to(ROOT)}")
+                print(f"             cat {' '.join(logd_relpaths)} > {display_path(logd_path)}")
             print(f"  {color(safe_pw, Colors.CYAN)}")
             print(f"  {color(f'encryptly unpack {decrypt_target} <outdir> --password {safe_pw}', Colors.GRAY)}")
         return True
@@ -775,7 +923,7 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
           f"{color(str(failed) + ' failed', Colors.RED)}, "
           f"{total_time:.1f}s total")
 
-def main():
+def parse_build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Tent of Trials  -  Multi-Language Build System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -794,8 +942,9 @@ Diagnostic bundle:
     )
     parser.add_argument(
         "-m", "--module",
-        help="Module(s) to build (comma-separated, or 'all')",
-        default="all",
+        action="append",
+        default=None,
+        help="Module to build. May be repeated; comma-separated values and 'all' are also supported.",
     )
     parser.add_argument(
         "--clean", action="store_true",
@@ -810,17 +959,49 @@ Diagnostic bundle:
         help="Show detailed build output",
     )
     parser.add_argument(
-        "--list", action="store_true",
+        "--list", "--list-modules", dest="list_modules", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--output-dir",
+        default=str(DIAGNOSTIC_DIR),
+        help="Directory for generated diagnostic artifacts (default: diagnostic/)",
+    )
 
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def module_names_from_args(module_args: Optional[list[str]]) -> list[str]:
+    if not module_args:
+        return ["all"]
+    names: list[str] = []
+    for value in module_args:
+        names.extend(part.strip() for part in value.split(",") if part.strip())
+    return names or ["all"]
+
+
+def select_modules(module_args: Optional[list[str]]) -> tuple[list[Module], list[str]]:
+    names = module_names_from_args(module_args)
+    if "all" in names:
+        return MODULES, []
+    by_name = {m.name: m for m in MODULES}
+    selected = [by_name[name] for name in names if name in by_name]
+    missing = sorted(set(names) - set(by_name))
+    return selected, missing
+
+
+def main(argv: Optional[list[str]] = None):
+    global DIAGNOSTIC_DIR
+    args = parse_build_args(argv)
+    DIAGNOSTIC_DIR = Path(args.output_dir).expanduser()
+    if not DIAGNOSTIC_DIR.is_absolute():
+        DIAGNOSTIC_DIR = ROOT / DIAGNOSTIC_DIR
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
 
-    if args.list:
+    if args.list_modules:
         print(f"  {color('Available modules:', Colors.BOLD)}")
         for m in MODULES:
             print(f"    {color(m.name, Colors.CYAN)} ({m.language})")
@@ -839,16 +1020,11 @@ Diagnostic bundle:
         print(f"  {color(msg, Colors.GRAY)}")
     else:
         print(f"  {color('✓ All prerequisites found', Colors.GREEN)}")
-    if args.module == "all":
-        selected = MODULES
-    else:
-        names = [n.strip() for n in args.module.split(",")]
-        selected = [m for m in MODULES if m.name in names]
-        not_found = set(names) - {m.name for m in MODULES}
-        if not_found:
-            print(f"  {color('✗ Unknown modules:', Colors.RED)} {', '.join(not_found)}")
-            print(f"    Available: {', '.join(m.name for m in MODULES)}")
-            return 1
+    selected, not_found = select_modules(args.module)
+    if not_found:
+        print(f"  {color('✗ Unknown modules:', Colors.RED)} {', '.join(not_found)}")
+        print(f"    Available: {', '.join(m.name for m in MODULES)}")
+        return 1
 
     if not selected:
         print(f"  No modules selected.")
