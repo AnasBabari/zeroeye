@@ -94,6 +94,21 @@ SUPPORTED_RESOURCE_TYPES = [
 
 REQUIRED_TERRAFORM_VERSION = ">= 1.0.0"
 
+# Terraform resource names must be valid identifiers: start with a letter or
+# underscore, followed by letters, digits, or underscores. Hyphens are invalid.
+TERRAFORM_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def validate_resource_name(resource_type: str, resource_name: str) -> None:
+    """Validate a Terraform resource name and raise ValueError if invalid."""
+    if not TERRAFORM_NAME_PATTERN.match(resource_name):
+        raise ValueError(
+            f"Invalid Terraform resource name '{resource_name}' for type "
+            f"'{resource_type}'. Resource names must start with a letter or "
+            f"underscore and contain only letters, digits, and underscores "
+            f"(no hyphens)."
+        )
+
 # ---------------------------------------------------------------------------
 # DATA MODELS
 # ---------------------------------------------------------------------------
@@ -142,6 +157,7 @@ class TerraformImporter:
             return False
 
     def import_resource(self, resource: ResourceToImport) -> bool:
+        validate_resource_name(resource.resource_type, resource.resource_name)
         address = f"{resource.resource_type}.{resource.resource_name}"
         cmd = [
             self.terraform_binary, "import",
@@ -208,6 +224,7 @@ class TerraformImporter:
         if dry_run:
             logger.info("DRY RUN - No resources will be imported")
             for resource in resources:
+                validate_resource_name(resource.resource_type, resource.resource_name)
                 address = f"{resource.resource_type}.{resource.resource_name}"
                 logger.info(f"  Would import: {address} (ID: {resource.resource_id})")
                 import_result.results.append({
